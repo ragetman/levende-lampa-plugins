@@ -15,7 +15,7 @@
     window.__profile_extra_waiter = function() { return true; };
 
     var pluginManifest = {
-        version: '3.2.0',
+        version: '3.2.1',
         author: 'levende',
         docs: 'https://levende.github.io/lampa-plugins/docs/profiles',
         contact: 'https://t.me/levende',
@@ -40,18 +40,32 @@
         return originalOpen.apply(this, arguments);
     };
 
+    // bookmark.js pull routes: /list before lampac 21.09.2026, /dump and /changelog after
+    var BOOKMARK_PULL_PATH_RE = /^\/(list|dump|changelog)(\?|$)/;
+    var BOOKMARK_PULL_URL_RE = /\/bookmark\/(list|dump|changelog)(\?|$)/;
+
+    // lampac event names contain a Cyrillic "С" (U+0421, bookmark_importСompleted), normalize before comparing
+    function lampacEventName(name) {
+        return String(name || '').replace(/\u0421/g, 'C');
+    }
+
+    function markFavoriteSynced() {
+        setTimeout(function () {
+            Lampa.Storage.set('lampac_sync_favorite', Date.now());
+        }, 350);
+    }
+
     XMLHttpRequest.prototype.send = function (body) {
         var xhr = this;
         var originalOnReadyStateChange = xhr.onreadystatechange;
 
         xhr.onreadystatechange = function () {
             var method = xhr._method;
-            var url = xhr._url;
+            var url = xhr._url || '';
 
-            if (method === 'GET' && url.indexOf('/bookmark/list') !== -1) {
-                setTimeout(function () {
-                    Lampa.Storage.set('lampac_sync_favorite', 666);
-                }, 350);
+            // Fallback signal for bookmark.js without the bookmark_importСompleted event (lampac before 28.03.2026)
+            if (xhr.readyState === 4 && method === 'GET' && BOOKMARK_PULL_URL_RE.test(url)) {
+                markFavoriteSynced();
             }
 
             if (originalOnReadyStateChange) {
@@ -851,6 +865,11 @@
             state.sync.timestamps.forEach(function (timestamp) {
                 Lampa.Storage.set(timestamp, 0);
             });
+
+            // lampac after 21.09.2026: one profile's bookmark delta cursor hides another profile's bookmarks,
+            // reset it so bookmark.js pulls a full /dump. Older servers do not use these keys
+            Lampa.Storage.set('lampac_bookmark_version', '0');
+            Lampa.Storage.set('lampac_timecode_cards', []);
             logger.debug('Profile data has been removed');
         }
     }
@@ -864,6 +883,14 @@
             Lampa.Storage.listener.follow('change', function (event) {
                 if (['account', 'account_use', 'lampac_unic_id'].indexOf(event.name) !== -1) {
                     location.reload();
+                }
+            });
+
+            // Primary signal: bookmark.js fires this event after each request, once the response is applied
+            Lampa.Listener.follow('lampac', function (event) {
+                if (lampacEventName(event.name) === 'bookmark_importCompleted'
+                    && BOOKMARK_PULL_PATH_RE.test(event.path || '')) {
+                    markFavoriteSynced();
                 }
             });
 
